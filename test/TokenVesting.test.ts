@@ -9,7 +9,6 @@ describe("TokenVesting", function () {
   let vesting: any; // Using any type for now since we don't have the generated types
   let owner: Signer;
   let addr1: Signer;
-  let addr2: Signer;
   let ownerAddress: string;
   const INITIAL_SUPPLY = ethers.parseEther("1000000000"); // 1 billion tokens
   const VESTING_AMOUNT = ethers.parseEther("100000000"); // 100 million tokens
@@ -18,12 +17,11 @@ describe("TokenVesting", function () {
   const VESTING_PERIODS = 12;
   const ONE_DAY = 86400;
   const ONE_MONTH = CLIFF_DURATION + ONE_DAY;
-  const TWO_MONTH = CLIFF_DURATION * 2 + ONE_DAY;
   const THREE_MONTH = CLIFF_DURATION * 3 + ONE_DAY;
 
   beforeEach(async function () {
     // Get signers
-    [owner, addr1, addr2] = await ethers.getSigners();
+    [owner, addr1] = await ethers.getSigners();
     ownerAddress = await owner.getAddress();
 
     // Deploy mock ERC20 token
@@ -154,15 +152,11 @@ describe("TokenVesting", function () {
       const halfwayTime = CLIFF_DURATION + VESTING_DURATION / 2;
       await time.increase(halfwayTime);
 
-      const totalLocked = await vesting.totalLocked();
-      console.log("totalLocked ", totalLocked);
-
       // Calculate expected vested periods based on new logic
       const vestedPeriods = Math.floor(halfwayTime / CLIFF_DURATION);
       const finalVestedPeriods =
         vestedPeriods >= VESTING_PERIODS ? VESTING_PERIODS : vestedPeriods;
 
-      console.log("finalVestedPeriods ", finalVestedPeriods);
       // Expected to have vested based on finalVestedPeriods
       const expectedClaimable =
         (VESTING_AMOUNT * BigInt(finalVestedPeriods)) / BigInt(VESTING_PERIODS);
@@ -188,9 +182,7 @@ describe("TokenVesting", function () {
     });
 
     it("Should allow claiming tokens after 3 periods", async function () {
-      // Advance time past 3 periods
-      const threePeriodsTime = CLIFF_DURATION * 3 + ONE_DAY;
-      await time.increase(threePeriodsTime);
+      await time.increase(THREE_MONTH + ONE_DAY);
 
       // Calculate expected claimable amount (3 periods worth)
       const expectedClaimable =
@@ -202,6 +194,97 @@ describe("TokenVesting", function () {
       expect(await token.balanceOf(ownerAddress)).to.equal(
         INITIAL_SUPPLY - VESTING_AMOUNT + expectedClaimable
       );
+    });
+
+    it("Should calculate claimable amount at specific timestamp", async function () {
+      // Get current timestamp and convert to BigInt
+      const currentTime = BigInt(await time.latest());
+
+      // Calculate a future timestamp (halfway through vesting)
+      const halfVestingDuration = BigInt(Math.floor(VESTING_DURATION / 2));
+      const futureTime =
+        currentTime + BigInt(CLIFF_DURATION) + halfVestingDuration;
+
+      // Calculate expected vested periods at future time
+      const startTime = BigInt(await vesting.startTime());
+      const elapsedTime = Number(futureTime - startTime);
+      const vestedPeriods = Math.floor(elapsedTime / CLIFF_DURATION);
+      const finalVestedPeriods =
+        vestedPeriods >= VESTING_PERIODS ? VESTING_PERIODS : vestedPeriods;
+
+      // Expected claimable at future time
+      const expectedClaimable =
+        (VESTING_AMOUNT * BigInt(finalVestedPeriods)) / BigInt(VESTING_PERIODS);
+
+      // Get actual claimable at future time
+      const actualClaimable = await vesting.calculateClaimableAt(futureTime);
+
+      expect(actualClaimable).to.equal(expectedClaimable);
+    });
+  });
+
+  describe("Vesting Progress", function () {
+    beforeEach(async function () {
+      await token.approve(await vesting.getAddress(), VESTING_AMOUNT);
+      await vesting.depositTokens(VESTING_AMOUNT);
+    });
+
+    it("Should show 0% progress before cliff", async function () {
+      expect(await vesting.getVestingProgress()).to.equal(0);
+    });
+
+    it("Should show correct progress during vesting", async function () {
+      // Advance time to 25% of vesting period
+      await time.increase(CLIFF_DURATION + VESTING_DURATION / 4);
+
+      // Calculate expected progress
+      const elapsedTime = CLIFF_DURATION + VESTING_DURATION / 4;
+      const vestedPeriods = Math.floor(elapsedTime / CLIFF_DURATION);
+      const finalVestedPeriods =
+        vestedPeriods >= VESTING_PERIODS ? VESTING_PERIODS : vestedPeriods;
+      const expectedProgress = Math.floor(
+        (finalVestedPeriods * 100) / VESTING_PERIODS
+      );
+
+      expect(await vesting.getVestingProgress()).to.equal(expectedProgress);
+    });
+
+    it("Should show 100% progress after vesting period", async function () {
+      // Advance time past full vesting period
+      await time.increase(VESTING_DURATION + 86400);
+
+      expect(await vesting.getVestingProgress()).to.equal(100);
+    });
+  });
+
+  describe("Next Vesting Time", function () {
+    beforeEach(async function () {
+      await token.approve(await vesting.getAddress(), VESTING_AMOUNT);
+      await vesting.depositTokens(VESTING_AMOUNT);
+    });
+
+    it("Should return correct next vesting time", async function () {
+      const startTime = await vesting.startTime();
+      const nextVestingTime = await vesting.getNextVestingTime();
+
+      expect(nextVestingTime).to.equal(startTime + BigInt(CLIFF_DURATION));
+    });
+
+    it("Should return correct next vesting time after first period", async function () {
+      // Advance time past first period
+      await time.increase(CLIFF_DURATION + ONE_DAY);
+
+      const startTime = await vesting.startTime();
+      const nextVestingTime = await vesting.getNextVestingTime();
+
+      expect(nextVestingTime).to.equal(startTime + BigInt(CLIFF_DURATION * 2));
+    });
+
+    it("Should return 0 when all tokens are vested", async function () {
+      // Advance time past full vesting period
+      await time.increase(VESTING_DURATION + 86400);
+
+      expect(await vesting.getNextVestingTime()).to.equal(0);
     });
   });
 

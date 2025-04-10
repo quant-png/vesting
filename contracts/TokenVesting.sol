@@ -17,14 +17,13 @@ contract TokenVesting is ReentrancyGuard, Pausable, Ownable {
         uint128 startTime;    // 16 bytes
         uint128 totalLocked;  // 16 bytes
         uint128 totalClaimed; // 16 bytes
+        uint128 vestingDuration; // 16 bytes
+        uint128 cliffDuration;   // 16 bytes
+        uint8 vestingPeriods;    // 1 byte
         bool initialized;     // 1 bit
     }
     
     VestingData private _data;
-
-    uint256 private constant VESTING_DURATION = 360 days;
-    uint256 private constant CLIFF_DURATION = 30 days;
-    uint256 private constant VESTING_PERIODS = 12;
 
     event TokensDeposited(address indexed depositor, uint256 amount, uint256 timestamp, bool isInitialized);
     event TokensClaimed(address indexed claimer, uint256 amount, uint256 timestamp);
@@ -41,12 +40,17 @@ contract TokenVesting is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
-     * @dev Constructor sets the token address.
+     * @dev Constructor sets the token address and default vesting parameters.
      * @param _token The address of the ERC20 token to be vested.
      */
     constructor(address _token) Ownable(msg.sender) {
         require(_token != address(0), "Invalid token address");
         token = IERC20(_token);
+        
+        // Set default vesting parameters
+        _data.vestingDuration = uint128(360 days);
+        _data.cliffDuration = uint128(30 days);
+        _data.vestingPeriods = 12;
     }
 
     /**
@@ -99,28 +103,43 @@ contract TokenVesting is ReentrancyGuard, Pausable, Ownable {
      * @return The amount of tokens that can be claimed.
      */
     function calculateClaimable() public view returns (uint256) {
-        if (!_data.initialized || block.timestamp < _data.startTime + CLIFF_DURATION) {
+        if (!_data.initialized || block.timestamp < _data.startTime + _data.cliffDuration) {
             return 0;
         }
 
         uint256 elapsedTime = block.timestamp - _data.startTime;
-        if (elapsedTime > VESTING_DURATION) {
+        if (elapsedTime > _data.vestingDuration) {
             return _data.totalLocked - _data.totalClaimed;
         }
 
-        // Calculate how many 30-day periods have passed
-        uint256 vestedPeriods = elapsedTime / CLIFF_DURATION;
-        
-        // Ensure we don't exceed the total number of periods
-        uint256 finalVestedPeriods = vestedPeriods >= VESTING_PERIODS ? VESTING_PERIODS : vestedPeriods;
+        uint256 vestedPeriods = elapsedTime / _data.cliffDuration;
+        uint256 finalVestedPeriods = vestedPeriods >= _data.vestingPeriods ? _data.vestingPeriods : vestedPeriods;
 
-        // Calculate tokens per period
-        uint256 tokensPerPeriod = _data.totalLocked / VESTING_PERIODS;
+        uint256 totalVested = (_data.totalLocked * finalVestedPeriods) / _data.vestingPeriods;
         
-        // Calculate total vested tokens
-        uint256 totalVested = tokensPerPeriod * finalVestedPeriods;
+        return totalVested > _data.totalClaimed ? totalVested - _data.totalClaimed : 0;
+    }
+
+    /**
+     * @dev Calculates the amount of tokens that can be claimed at a specific timestamp.
+     * @param _timestamp The timestamp to check
+     * @return The amount of tokens that can be claimed at the specified timestamp.
+     */
+    function calculateClaimableAt(uint256 _timestamp) public view returns (uint256) {
+        if (!_data.initialized || _timestamp < _data.startTime + _data.cliffDuration) {
+            return 0;
+        }
+
+        uint256 elapsedTime = _timestamp - _data.startTime;
+        if (elapsedTime > _data.vestingDuration) {
+            return _data.totalLocked - _data.totalClaimed;
+        }
+
+        uint256 vestedPeriods = elapsedTime / _data.cliffDuration;
+        uint256 finalVestedPeriods = vestedPeriods >= _data.vestingPeriods ? _data.vestingPeriods : vestedPeriods;
+
+        uint256 totalVested = (_data.totalLocked * finalVestedPeriods) / _data.vestingPeriods;
         
-        // Return claimable token amount
         return totalVested > _data.totalClaimed ? totalVested - _data.totalClaimed : 0;
     }
 
@@ -207,10 +226,35 @@ contract TokenVesting is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
-     * @dev Returns whether the vesting is initialized.
-     * @return True if initialized, false otherwise.
+     * @dev Returns the vesting progress as a percentage (0-100).
+     * @return The percentage of tokens that have been vested.
      */
-    function vestingDuration() external pure returns (uint256) {
-        return CLIFF_DURATION;
+    function getVestingProgress() public view returns (uint256) {
+        if (!_data.initialized) return 0;
+        
+        uint256 elapsedTime = block.timestamp - _data.startTime;
+        if (elapsedTime < _data.cliffDuration) return 0;
+        if (elapsedTime >= _data.vestingDuration) return 100;
+
+        uint256 vestedPeriods = elapsedTime / _data.cliffDuration;
+        uint256 finalVestedPeriods = vestedPeriods >= _data.vestingPeriods ? _data.vestingPeriods : vestedPeriods;
+        
+        return (finalVestedPeriods * 100) / _data.vestingPeriods;
+    }
+
+    /**
+     * @dev Returns the timestamp of the next vesting period.
+     * @return The timestamp of the next vesting period, or 0 if all tokens are vested.
+     */
+    function getNextVestingTime() public view returns (uint256) {
+        if (!_data.initialized) return 0;
+        
+        uint256 elapsedTime = block.timestamp - _data.startTime;
+        if (elapsedTime >= _data.vestingDuration) return 0;
+
+        uint256 currentPeriod = elapsedTime / _data.cliffDuration;
+        if (currentPeriod >= _data.vestingPeriods) return 0;
+
+        return _data.startTime + ((currentPeriod + 1) * _data.cliffDuration);
     }
 }
